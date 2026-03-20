@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WALLHACK // TRACKER</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.10.0/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap');
+
+:root {
+  --green: #00ff41;
+  --red: #ff003c;
+  --blue: #00cfff;
+  --orange: #ff8800;
+  --bg: #020a04;
+  --panel-bg: rgba(2,12,4,0.97);
+  --border: rgba(0,255,65,0.2);
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--green);
+  font-family: 'Share Tech Mono', monospace;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Scanlines */
+body::before {
+  content:'';
+  position:fixed; inset:0;
+  background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.12) 3px, rgba(0,0,0,0.12) 4px);
+  pointer-events:none; z-index:200;
+}
+
+/* Vignette */
+body::after {
+  content:'';
+  position:fixed; inset:0;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.75) 100%);
+  pointer-events:none; z-index:199;
+}
+
+/* ── HEADER ── */
+header {
+  height: 46px;
+  display:flex; align-items:center; justify-content:space-between;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-bg);
+  z-index:10; position:relative; flex-shrink:0;
+}
+
+.logo {
+  font-family:'Orbitron',sans-serif; font-weight:900; font-size:1.1rem;
+  letter-spacing:.35em;
+  text-shadow: 0 0 8px var(--green), 0 0 25px var(--green);
+  animation: logoGlow 4s ease-in-out infinite;
+}
+@keyframes logoGlow {
+  0%,100%{text-shadow:0 0 8px var(--green),0 0 25px var(--green);}
+  50%{text-shadow:0 0 16px var(--green),0 0 50px var(--green),0 0 80px var(--green);}
+}
+
+.hdr-stats { display:flex; gap:22px; font-size:.65rem; }
+.hs { display:flex; flex-direction:column; align-items:center; gap:1px; }
+.hs-label { opacity:.45; font-size:.55rem; letter-spacing:.1em; }
+.hs-val { color:var(--blue); font-weight:bold; }
+
+/* ── MAIN LAYOUT ── */
+.main { flex:1; display:flex; overflow:hidden; }
+
+/* ── VIDEO AREA ── */
+.video-wrap {
+  flex:1; position:relative; background:#000;
+  display:flex; align-items:center; justify-content:center;
+}
+video {
+  width:100%; height:100%; object-fit:cover;
+  filter: brightness(.75) contrast(1.1) saturate(0.25);
+  transform: scaleX(-1);
+}
+canvas#overlay {
+  position:absolute; inset:0; width:100%; height:100%;
+  pointer-events:none;
+  transform: scaleX(-1);
+}
+
+/* HUD corner brackets */
+.hud-corner { position:absolute; width:28px; height:28px; z-index:5; }
+.hud-corner.tl { top:10px; left:10px; border-top:2px solid var(--green); border-left:2px solid var(--green); }
+.hud-corner.tr { top:10px; right:10px; border-top:2px solid var(--green); border-right:2px solid var(--green); }
+.hud-corner.bl { bottom:10px; left:10px; border-bottom:2px solid var(--green); border-left:2px solid var(--green); }
+.hud-corner.br { bottom:10px; right:10px; border-bottom:2px solid var(--green); border-right:2px solid var(--green); }
+
+/* Recording dot */
+.rec-dot {
+  position:absolute; top:14px; left:50%; transform:translateX(-50%);
+  display:flex; align-items:center; gap:7px; font-size:.6rem; opacity:.7; z-index:5;
+}
+.dot { width:7px; height:7px; border-radius:50%; background:var(--red);
+  animation: blink .9s step-end infinite; }
+@keyframes blink { 0%,100%{opacity:1;} 50%{opacity:0;} }
+
+/* ── SIDE PANEL ── */
+.panel {
+  width:230px; background:var(--panel-bg);
+  border-left:1px solid var(--border);
+  display:flex; flex-direction:column; gap:0;
+  overflow-y:auto; z-index:10;
+}
+
+.psec {
+  border-bottom:1px solid var(--border);
+  padding:11px 13px;
+}
+.psec-title {
+  font-family:'Orbitron',sans-serif; font-size:.52rem;
+  letter-spacing:.2em; opacity:.55;
+  margin-bottom:8px; padding-bottom:4px;
+  border-bottom:1px solid rgba(0,255,65,.12);
+}
+
+/* Legend */
+.legend { display:flex; flex-direction:column; gap:6px; }
+.legend-row { display:flex; align-items:center; gap:8px; font-size:.65rem; }
+.legend-dot { width:10px; height:10px; border-radius:1px; flex-shrink:0; }
+.ld-live { background:var(--red); box-shadow:0 0 6px var(--red); }
+.ld-ghost { background:var(--orange); box-shadow:0 0 6px var(--orange); opacity:.8; }
+.ld-lost { background:#555; }
+.legend-desc { opacity:.7; }
+
+/* Target list */
+#tgt-list { display:flex; flex-direction:column; gap:5px; min-height:40px; }
+.tgt-card {
+  padding:6px 8px; font-size:.6rem;
+  border-left:2px solid var(--red);
+  background:rgba(255,0,60,.07);
+  display:flex; flex-direction:column; gap:2px;
+  transition: border-color .3s;
+}
+.tgt-card.ghost { border-left-color:var(--orange); background:rgba(255,136,0,.07); }
+.tgt-card.lost  { border-left-color:#444; background:rgba(80,80,80,.07); opacity:.5; }
+.tgt-id { color:var(--green); letter-spacing:.1em; }
+.tgt-status { opacity:.6; }
+.tgt-conf { color:var(--blue); }
+
+.no-tgt { font-size:.6rem; opacity:.35; font-style:italic; }
+
+/* Sliders */
+.slider-row { display:flex; flex-direction:column; gap:3px; margin-bottom:7px; font-size:.6rem; }
+.slider-row label { display:flex; justify-content:space-between; }
+.slider-row input[type=range] {
+  width:100%; accent-color:var(--green); cursor:pointer; height:3px;
+}
+
+/* Feed */
+#feed { font-size:.55rem; opacity:.4; display:flex; flex-direction:column; gap:1px; overflow:hidden; max-height:90px; }
+.feed-line { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+/* START screen */
+#start {
+  position:absolute; inset:0;
+  background:rgba(2,8,4,.97);
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:26px; z-index:300;
+}
+.start-logo {
+  font-family:'Orbitron',sans-serif; font-weight:900;
+  font-size: clamp(1.8rem,5vw,3.5rem);
+  letter-spacing:.4em; text-align:center;
+  text-shadow:0 0 20px var(--green),0 0 60px var(--green);
+  animation:logoGlow 2s ease-in-out infinite;
+}
+.start-sub { font-size:.75rem; opacity:.5; letter-spacing:.15em; text-align:center; }
+.start-feature {
+  font-size:.65rem; opacity:.6; text-align:center; line-height:1.9;
+  border:1px solid var(--border); padding:12px 20px;
+}
+.start-feature span { color:var(--orange); }
+
+.start-btn {
+  font-family:'Orbitron',sans-serif; font-size:.85rem; letter-spacing:.3em;
+  padding:13px 38px; background:transparent;
+  color:var(--green); border:2px solid var(--green); cursor:pointer;
+  box-shadow:0 0 18px rgba(0,255,65,.25), inset 0 0 18px rgba(0,255,65,.04);
+  transition:all .2s;
+}
+.start-btn:hover { background:var(--green); color:#000; box-shadow:0 0 50px rgba(0,255,65,.9); }
+
+.prog-wrap { width:250px; height:3px; background:rgba(0,255,65,.12); display:none; }
+.prog-fill { height:100%; background:var(--green); width:0%; transition:width .3s; box-shadow:0 0 8px var(--green); }
+#load-msg { font-size:.65rem; opacity:.55; letter-spacing:.1em; min-height:1em; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">◈ WALLHACK</div>
+  <div class="hdr-stats">
+    <div class="hs"><span class="hs-label">CIBLES</span><span class="hs-val" id="h-count">0</span></div>
+    <div class="hs"><span class="hs-label">GHOSTS</span><span class="hs-val" id="h-ghosts">0</span></div>
+    <div class="hs"><span class="hs-label">FPS</span><span class="hs-val" id="h-fps">--</span></div>
+    <div class="hs"><span class="hs-label">STATUS</span><span class="hs-val" id="h-status">INIT</span></div>
+  </div>
+</header>
+
+<div class="main">
+  <!-- START SCREEN -->
+  <div id="start">
+    <div class="start-logo">WALLHACK<br><span style="font-size:.45em;opacity:.6;letter-spacing:.5em">TRACKER</span></div>
+    <div class="start-sub">// DÉTECTION + PRÉDICTION DE TRAJECTOIRE //</div>
+    <div class="start-feature">
+      ✦ Détection IA en temps réel<br>
+      <span>✦ Ghost prédictif quand la cible disparaît</span><br>
+      ✦ Kalman filter simplifié (vélocité + accélération)<br>
+      <span>✦ Réassociation automatique au retour</span>
+    </div>
+    <button class="start-btn" onclick="boot()">▶ ACTIVER</button>
+    <div class="prog-wrap" id="prog-wrap"><div class="prog-fill" id="prog"></div></div>
+    <div id="load-msg"></div>
+  </div>
+
+  <!-- VIDEO -->
+  <div class="video-wrap">
+    <div class="hud-corner tl"></div>
+    <div class="hud-corner tr"></div>
+    <div class="hud-corner bl"></div>
+    <div class="hud-corner br"></div>
+    <div class="rec-dot"><div class="dot"></div>REC</div>
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <!-- PANEL -->
+  <div class="panel">
+    <div class="psec">
+      <div class="psec-title">// LÉGENDE</div>
+      <div class="legend">
+        <div class="legend-row"><div class="legend-dot ld-live"></div><span class="legend-desc">DÉTECTÉ (IA)</span></div>
+        <div class="legend-row"><div class="legend-dot ld-ghost"></div><span class="legend-desc">GHOST (prédit)</span></div>
+        <div class="legend-row"><div class="legend-dot ld-lost"></div><span class="legend-desc">PERDU / expiré</span></div>
+      </div>
+    </div>
+
+    <div class="psec">
+      <div class="psec-title">// PARAMÈTRES</div>
+      <div class="slider-row">
+        <label><span>Durée ghost</span><span id="lbl-ghost" style="color:var(--orange)">4.0s</span></label>
+        <input type="range" id="sl-ghost" min="1" max="10" step="0.5" value="4" oninput="updateParams()">
+      </div>
+      <div class="slider-row">
+        <label><span>Confiance min</span><span id="lbl-conf" style="color:var(--blue)">45%</span></label>
+        <input type="range" id="sl-conf" min="20" max="90" step="5" value="45" oninput="updateParams()">
+      </div>
+      <div class="slider-row">
+        <label><span>Lissage</span><span id="lbl-smooth" style="color:var(--green)">0.6</span></label>
+        <input type="range" id="sl-smooth" min="0.1" max="0.95" step="0.05" value="0.6" oninput="updateParams()">
+      </div>
+    </div>
+
+    <div class="psec" style="flex:1">
+      <div class="psec-title">// CIBLES TRACKÉES</div>
+      <div id="tgt-list"><div class="no-tgt">EN ATTENTE...</div></div>
+    </div>
+
+    <div class="psec">
+      <div class="psec-title">// JOURNAL</div>
+      <div id="feed"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════
+//  PARAMS
+// ═══════════════════════════════════════════════
+let GHOST_TTL    = 4000;   // ms before ghost expires
+let MIN_CONF     = 0.45;
+let SMOOTH       = 0.6;    // EMA alpha for position update
+
+function updateParams() {
+  GHOST_TTL = parseFloat(document.getElementById('sl-ghost').value) * 1000;
+  MIN_CONF  = parseFloat(document.getElementById('sl-conf').value) / 100;
+  SMOOTH    = parseFloat(document.getElementById('sl-smooth').value);
+  document.getElementById('lbl-ghost').textContent  = (GHOST_TTL/1000).toFixed(1) + 's';
+  document.getElementById('lbl-conf').textContent   = (MIN_CONF*100).toFixed(0) + '%';
+  document.getElementById('lbl-smooth').textContent = SMOOTH.toFixed(2);
+}
+
+// ═══════════════════════════════════════════════
+//  TRACKER — one per tracked person
+// ═══════════════════════════════════════════════
+let nextId = 1;
+
+class PersonTracker {
+  constructor(bbox) {
+    this.id      = nextId++;
+    this.state   = 'live';       // 'live' | 'ghost' | 'lost'
+    this.bbox    = [...bbox];    // [x,y,w,h] in video pixels
+    this.vx      = 0;            // velocity x (px/ms)
+    this.vy      = 0;
+    this.ax      = 0;            // acceleration
+    this.ay      = 0;
+    this.conf    = 1;
+    this.lastSeen = performance.now();
+    this.ghostSince = null;
+    this.trail   = [];           // last N centre points
+    this.age     = 0;            // frames alive
+  }
+
+  centre() {
+    return [this.bbox[0]+this.bbox[2]/2, this.bbox[1]+this.bbox[3]/2];
+  }
+
+  /* Update from a fresh detection */
+  updateLive(bbox, conf, dt) {
+    const prevCx = this.bbox[0]+this.bbox[2]/2;
+    const prevCy = this.bbox[1]+this.bbox[3]/2;
+    const a = SMOOTH;
+
+    // EMA for bbox
+    this.bbox[0] = a*this.bbox[0] + (1-a)*bbox[0];
+    this.bbox[1] = a*this.bbox[1] + (1-a)*bbox[1];
+    this.bbox[2] = a*this.bbox[2] + (1-a)*bbox[2];
+    this.bbox[3] = a*this.bbox[3] + (1-a)*bbox[3];
+
+    const cx = this.bbox[0]+this.bbox[2]/2;
+    const cy = this.bbox[1]+this.bbox[3]/2;
+
+    if (dt > 0) {
+      const newVx = (cx - prevCx) / dt;
+      const newVy = (cy - prevCy) / dt;
+      // EMA for velocity
+      this.ax = 0.5*(newVx - this.vx) / dt;
+      this.ay = 0.5*(newVy - this.vy) / dt;
+      this.vx = 0.7*this.vx + 0.3*newVx;
+      this.vy = 0.7*this.vy + 0.3*newVy;
+    }
+
+    this.conf      = conf;
+    this.state     = 'live';
+    this.lastSeen  = performance.now();
+    this.ghostSince = null;
+    this.age++;
+    this.addTrail(cx, cy);
+  }
+
+  /* Predict position when invisible */
+  predict(now) {
+    if (this.state === 'lost') return;
+
+    if (!this.ghostSince) this.ghostSince = now;
+    this.state = 'ghost';
+
+    const dt = (now - this.lastSeen) / 1000; // seconds since last real detection
+
+    // Kinematic prediction with drag (velocity decays)
+    const decay = Math.exp(-0.8 * dt);
+    const vx = this.vx * decay;
+    const vy = this.vy * decay;
+
+    // Predicted centre
+    const [cx0, cy0] = this.centre();
+    // We stored velocity in px/ms; convert:
+    const predCx = cx0 + this.vx * (now - this.lastSeen) * decay;
+    const predCy = cy0 + this.vy * (now - this.lastSeen) * decay;
+
+    // Keep bbox size, move centre
+    this.bbox[0] = predCx - this.bbox[2]/2;
+    this.bbox[1] = predCy - this.bbox[3]/2;
+
+    this.addTrail(predCx, predCy);
+
+    // Expire
+    if (now - this.ghostSince > GHOST_TTL) {
+      this.state = 'lost';
+    }
+  }
+
+  addTrail(cx, cy) {
+    this.trail.push({x:cx, y:cy, t:performance.now()});
+    if (this.trail.length > 40) this.trail.shift();
+  }
+
+  ghostAlpha() {
+    if (this.state !== 'ghost') return 1;
+    const elapsed = performance.now() - this.ghostSince;
+    return Math.max(0, 1 - elapsed / GHOST_TTL);
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  MATCHING — IoU + distance
+// ═══════════════════════════════════════════════
+function iou(a, b) {
+  const ax2 = a[0]+a[2], ay2 = a[1]+a[3];
+  const bx2 = b[0]+b[2], by2 = b[1]+b[3];
+  const ix1=Math.max(a[0],b[0]), iy1=Math.max(a[1],b[1]);
+  const ix2=Math.min(ax2,bx2),   iy2=Math.min(ay2,by2);
+  if (ix2<ix1 || iy2<iy1) return 0;
+  const inter=(ix2-ix1)*(iy2-iy1);
+  const ua = a[2]*a[3] + b[2]*b[3] - inter;
+  return inter/ua;
+}
+
+function dist2(a, b) {
+  const cx1=a[0]+a[2]/2, cy1=a[1]+a[3]/2;
+  const cx2=b[0]+b[2]/2, cy2=b[1]+b[3]/2;
+  return Math.hypot(cx1-cx2, cy1-cy2);
+}
+
+// ═══════════════════════════════════════════════
+//  GLOBALS
+// ═══════════════════════════════════════════════
+let model, video, canvas, ctx;
+let trackers = [];
+let lastDetectTime = performance.now();
+let frameCount=0, lastFpsT=performance.now();
+let totalTrackIds=0;
+
+// ═══════════════════════════════════════════════
+//  BOOT
+// ═══════════════════════════════════════════════
+async function boot() {
+  const btn = document.querySelector('.start-btn');
+  btn.disabled = true; btn.textContent = 'INITIALISATION...';
+  document.getElementById('prog-wrap').style.display='block';
+  setMsg('▸ Accès caméra...'); setProg(10);
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false});
+    video = document.getElementById('video');
+    video.srcObject = stream;
+    await new Promise(r => video.onloadedmetadata = r);
+  } catch(e) {
+    setMsg('✗ Caméra refusée.'); btn.disabled=false; btn.textContent='▶ RÉESSAYER'; return;
+  }
+
+  setMsg('▸ Chargement modèle IA...'); setProg(40);
+  model = await cocoSsd.load({base:'mobilenet_v2'});
+  setProg(95); setMsg('▸ Démarrage tracking...'); 
+
+  await new Promise(r=>setTimeout(r,350));
+  document.getElementById('start').style.display='none';
+  document.getElementById('h-status').textContent='ACTIF';
+
+  canvas = document.getElementById('overlay');
+  ctx = canvas.getContext('2d');
+  resize(); window.addEventListener('resize', resize);
+
+  loop();
+}
+
+function setMsg(t){document.getElementById('load-msg').textContent=t;}
+function setProg(p){document.getElementById('prog').style.width=p+'%';}
+
+function resize() {
+  const r = video.getBoundingClientRect();
+  canvas.width=r.width; canvas.height=r.height;
+}
+
+// ═══════════════════════════════════════════════
+//  MAIN LOOP
+// ═══════════════════════════════════════════════
+async function loop() {
+  if (!model) return;
+  const now = performance.now();
+  const dt = now - lastDetectTime;
+  lastDetectTime = now;
+
+  // FPS
+  frameCount++;
+  if (now - lastFpsT > 600) {
+    document.getElementById('h-fps').textContent = Math.round(frameCount / ((now-lastFpsT)/1000));
+    frameCount=0; lastFpsT=now;
+  }
+
+  // ── Detection ──
+  let detections = [];
+  try { detections = (await model.detect(video)).filter(d => d.class==='person' && d.score>=MIN_CONF); }
+  catch(e){}
+
+  // Scale detections to canvas coords
+  const sx = canvas.width / video.videoWidth;
+  const sy = canvas.height / video.videoHeight;
+  const scaled = detections.map(d => ({
+    bbox:[d.bbox[0]*sx, d.bbox[1]*sy, d.bbox[2]*sx, d.bbox[3]*sy],
+    score:d.score
+  }));
+
+  // ── Associate detections to trackers ──
+  const matched = new Set();
+  const usedDets = new Set();
+
+  // Greedily match by IoU then distance
+  for (const tr of trackers.filter(t=>t.state!=='lost')) {
+    let bestScore = -1, bestDet = -1;
+    for (let i=0; i<scaled.length; i++) {
+      if (usedDets.has(i)) continue;
+      const overlap = iou(tr.bbox, scaled[i].bbox);
+      const d = dist2(tr.bbox, scaled[i].bbox);
+      const score = overlap*2 - d*0.001;
+      if (score > bestScore) { bestScore=score; bestDet=i; }
+    }
+    // Accept match if IoU>0.1 or distance<200px
+    if (bestDet>=0) {
+      const overlap = iou(tr.bbox, scaled[bestDet].bbox);
+      const d = dist2(tr.bbox, scaled[bestDet].bbox);
+      if (overlap>0.1 || d<200) {
+        tr.updateLive(scaled[bestDet].bbox, scaled[bestDet].score, dt);
+        matched.add(tr.id);
+        usedDets.add(bestDet);
+      }
+    }
+  }
+
+  // Unmatched trackers → predict (ghost)
+  for (const tr of trackers) {
+    if (!matched.has(tr.id) && tr.state!=='lost') {
+      tr.predict(now);
+    }
+  }
+
+  // New detections → new trackers
+  for (let i=0; i<scaled.length; i++) {
+    if (!usedDets.has(i)) {
+      const t = new PersonTracker(scaled[i].bbox);
+      t.conf = scaled[i].score;
+      totalTrackIds++;
+      trackers.push(t);
+      addFeed(`NEW TGT-${t.id} détectée`);
+    }
+  }
+
+  // Remove fully lost trackers older than 2s
+  trackers = trackers.filter(t => !(t.state==='lost' && performance.now()-t.ghostSince > GHOST_TTL+2000));
+
+  // ── Draw ──
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  const live   = trackers.filter(t=>t.state==='live');
+  const ghosts = trackers.filter(t=>t.state==='ghost');
+
+  for (const t of trackers) drawTracker(t);
+  drawCrosshair(live);
+
+  // Update UI
+  document.getElementById('h-count').textContent = live.length;
+  document.getElementById('h-ghosts').textContent = ghosts.length;
+  updateTargetList();
+
+  requestAnimationFrame(loop);
+}
+
+// ═══════════════════════════════════════════════
+//  DRAWING
+// ═══════════════════════════════════════════════
+function drawTracker(t) {
+  const [x,y,w,h] = t.bbox;
+  const alpha = t.ghostAlpha();
+  if (alpha <= 0) return;
+
+  const isLive  = t.state==='live';
+  const isGhost = t.state==='ghost';
+
+  const col = isLive ? '#ff003c' : isGhost ? '#ff8800' : '#555';
+
+  ctx.save();
+  ctx.globalAlpha = isGhost ? alpha * 0.85 : 1;
+
+  // ── Trail ──
+  if (t.trail.length > 1) {
+    ctx.beginPath();
+    const trailAge = 1500; // ms
+    for (let i=1; i<t.trail.length; i++) {
+      const pt = t.trail[i];
+      const age = (performance.now() - pt.t) / trailAge;
+      if (age > 1) continue;
+      const a = (1-age) * 0.35 * alpha;
+      ctx.strokeStyle = col;
+      ctx.globalAlpha = a;
+      ctx.lineWidth = 1.5;
+      if (i===1) ctx.moveTo(t.trail[i-1].x, t.trail[i-1].y);
+      ctx.lineTo(pt.x, pt.y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = isGhost ? alpha*0.85 : 1;
+  }
+
+  // ── Bounding box ──
+  if (isGhost) {
+    // Dashed pulsing
+    const pulse = (Math.sin(performance.now()/250)+1)/2;
+    ctx.setLineDash([8,5]);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.shadowColor = col;
+    ctx.shadowBlur = 12 + pulse*10;
+    ctx.strokeRect(x,y,w,h);
+    ctx.setLineDash([]);
+    ctx.shadowBlur = 0;
+
+    // Ghost fill with animated scan
+    const scanT = (performance.now() % 1800) / 1800;
+    const scanY = y + h * scanT;
+    const grd = ctx.createLinearGradient(x, y, x, y+h);
+    grd.addColorStop(0,   'rgba(255,136,0,0.02)');
+    grd.addColorStop(Math.max(0,scanT-0.05), 'rgba(255,136,0,0.02)');
+    grd.addColorStop(scanT, 'rgba(255,136,0,0.18)');
+    grd.addColorStop(Math.min(1,scanT+0.05), 'rgba(255,136,0,0.02)');
+    grd.addColorStop(1,   'rgba(255,136,0,0.02)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(x,y,w,h);
+
+    // GHOST label
+    ctx.font = 'bold 10px "Share Tech Mono"';
+    ctx.fillStyle = col;
+    ctx.shadowColor = col; ctx.shadowBlur = 8;
+    ctx.fillText(`GHOST-${t.id} [${(alpha*100).toFixed(0)}%]`, x+3, y-5);
+    ctx.shadowBlur = 0;
+
+    // Predicted velocity arrow from centre
+    const [cx,cy] = t.centre();
+    const speed = Math.hypot(t.vx, t.vy) * 100; // scale for visibility
+    if (speed > 2) {
+      const len = Math.min(speed * 60, w*0.5);
+      const ang = Math.atan2(t.vy, t.vx);
+      drawArrow(cx, cy, cx+Math.cos(ang)*len, cy+Math.sin(ang)*len, col, alpha*0.7);
+    }
+
+  } else {
+    // Live — solid neon box with corner brackets
+    for (let g=3;g>=1;g--) {
+      ctx.strokeStyle = col;
+      ctx.lineWidth = g*4;
+      ctx.globalAlpha = 0.04*g;
+      ctx.strokeRect(x-g,y-g,w+g*2,h+g*2);
+    }
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.shadowColor = col; ctx.shadowBlur = 14;
+    ctx.strokeRect(x,y,w,h);
+    ctx.shadowBlur = 0;
+
+    // Fill
+    ctx.fillStyle = 'rgba(255,0,60,0.06)';
+    ctx.fillRect(x,y,w,h);
+
+    // Corner brackets
+    const cs=16;
+    ctx.shadowColor=col; ctx.shadowBlur=10;
+    [[x,y],[x+w,y],[x,y+h],[x+w,y+h]].forEach(([bx,by],i)=>{
+      const dx=i%2===0?1:-1, dy=i<2?1:-1;
+      ctx.beginPath();
+      ctx.moveTo(bx+dx*cs,by); ctx.lineTo(bx,by); ctx.lineTo(bx,by+dy*cs);
+      ctx.stroke();
+    });
+    ctx.shadowBlur=0;
+
+    // Head circle
+    const hr = w*0.12;
+    ctx.beginPath(); ctx.arc(x+w/2, y+hr*0.8, hr, 0, Math.PI*2);
+    ctx.stroke();
+
+    // Label
+    ctx.font='bold 10px "Share Tech Mono"';
+    ctx.fillStyle=col; ctx.shadowColor=col; ctx.shadowBlur=8;
+    ctx.fillText(`TGT-${t.id}  ${(t.conf*100).toFixed(0)}%`, x+3, y-5);
+    ctx.shadowBlur=0;
+  }
+
+  ctx.restore();
+}
+
+function drawArrow(x1,y1,x2,y2,col,alpha) {
+  const ang = Math.atan2(y2-y1,x2-x1);
+  const as = 8;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = col; ctx.fillStyle = col;
+  ctx.lineWidth = 1.5;
+  ctx.shadowColor=col; ctx.shadowBlur=6;
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x2,y2);
+  ctx.lineTo(x2-as*Math.cos(ang-0.4), y2-as*Math.sin(ang-0.4));
+  ctx.lineTo(x2-as*Math.cos(ang+0.4), y2-as*Math.sin(ang+0.4));
+  ctx.closePath(); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.restore();
+}
+
+function drawCrosshair(live) {
+  if (live.length===0) return;
+  // Crosshair on biggest live target
+  const biggest = live.reduce((a,b)=>a.bbox[2]*a.bbox[3]>b.bbox[2]*b.bbox[3]?a:b);
+  const [cx,cy] = biggest.centre();
+  const s=22, g=7;
+  ctx.strokeStyle='rgba(255,0,60,0.7)';
+  ctx.lineWidth=1.5; ctx.shadowColor='#ff003c'; ctx.shadowBlur=8;
+  ctx.beginPath();
+  ctx.moveTo(cx-s,cy); ctx.lineTo(cx-g,cy);
+  ctx.moveTo(cx+g,cy); ctx.lineTo(cx+s,cy);
+  ctx.moveTo(cx,cy-s); ctx.lineTo(cx,cy-g);
+  ctx.moveTo(cx,cy+g); ctx.lineTo(cx,cy+s);
+  ctx.stroke(); ctx.shadowBlur=0;
+}
+
+// ═══════════════════════════════════════════════
+//  UI UPDATES
+// ═══════════════════════════════════════════════
+function updateTargetList() {
+  const el = document.getElementById('tgt-list');
+  const active = trackers.filter(t=>t.state!=='lost');
+  if (active.length===0) { el.innerHTML='<div class="no-tgt">AUCUNE CIBLE</div>'; return; }
+  el.innerHTML = active.map(t=>{
+    const cls = t.state==='ghost'?'ghost':t.state==='lost'?'lost':'';
+    const stateStr = t.state==='live'?'● LIVE':t.state==='ghost'?'◌ GHOST':'✗ LOST';
+    const pct = t.state==='ghost'?(t.ghostAlpha()*100).toFixed(0)+'%':'--';
+    return `<div class="tgt-card ${cls}">
+      <div class="tgt-id">TGT-${t.id}</div>
+      <div class="tgt-status">${stateStr} ${t.state==='ghost'?'['+pct+']':''}</div>
+      <div class="tgt-conf">CONF ${(t.conf*100).toFixed(0)}% | AGE ${t.age}f</div>
+    </div>`;
+  }).join('');
+}
+
+let feedLines = [];
+function addFeed(msg) {
+  const ts = new Date().toLocaleTimeString('fr',{hour12:false});
+  feedLines.unshift(`[${ts}] ${msg}`);
+  if (feedLines.length>10) feedLines.pop();
+  document.getElementById('feed').innerHTML = feedLines.map(l=>`<div class="feed-line">${l}</div>`).join('');
+}
+</script>
+</body>
+</html>
