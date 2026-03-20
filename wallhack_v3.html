@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>WALLHACK // TRACKER</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.10.0/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap');
+
+:root {
+  --green:  #00ff41;
+  --red:    #ff003c;
+  --blue:   #00cfff;
+  --orange: #ff8800;
+  --bg:     #010801;
+  --panel:  rgba(1,10,2,0.97);
+  --border: rgba(0,255,65,0.18);
+  --panel-w: 230px;
+}
+
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+
+html, body {
+  width:100%; height:100%;
+  background:#000;
+  overflow:hidden;
+  font-family:'Share Tech Mono', monospace;
+  color:var(--green);
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+/* ── Scanlines ── */
+body::before {
+  content:'';
+  position:fixed; inset:0; z-index:500;
+  background: repeating-linear-gradient(
+    0deg, transparent, transparent 3px,
+    rgba(0,0,0,0.1) 3px, rgba(0,0,0,0.1) 4px
+  );
+  pointer-events:none;
+}
+/* ── Vignette ── */
+body::after {
+  content:'';
+  position:fixed; inset:0; z-index:499;
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.72) 100%);
+  pointer-events:none;
+}
+
+/* ════════════════════════════
+   LAYOUT
+════════════════════════════ */
+#app {
+  position:fixed; inset:0;
+  display:flex; flex-direction:column;
+}
+
+/* ── Header ── */
+header {
+  height:44px; flex-shrink:0;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:0 14px;
+  background:var(--panel);
+  border-bottom:1px solid var(--border);
+  z-index:20;
+  position:relative;
+}
+
+.logo {
+  font-family:'Orbitron',sans-serif; font-weight:900; font-size:1rem;
+  letter-spacing:.3em;
+  text-shadow:0 0 8px var(--green), 0 0 22px var(--green);
+  animation:glow 4s ease-in-out infinite;
+  white-space:nowrap;
+}
+@keyframes glow {
+  0%,100%{text-shadow:0 0 8px var(--green),0 0 22px var(--green);}
+  50%{text-shadow:0 0 14px var(--green),0 0 45px var(--green),0 0 70px var(--green);}
+}
+
+.hdr-right { display:flex; align-items:center; gap:14px; }
+
+.hstats { display:flex; gap:16px; font-size:.6rem; }
+.hs { display:flex; flex-direction:column; align-items:center; gap:1px; }
+.hs-lbl { opacity:.4; font-size:.5rem; letter-spacing:.1em; }
+.hs-val { color:var(--blue); font-weight:bold; }
+
+/* Panel toggle button */
+#panel-toggle {
+  width:32px; height:32px; flex-shrink:0;
+  background:transparent;
+  border:1px solid var(--border);
+  color:var(--green);
+  cursor:pointer;
+  display:flex; align-items:center; justify-content:center;
+  font-size:1rem;
+  transition:all .2s;
+  position:relative; z-index:21;
+}
+#panel-toggle:hover, #panel-toggle:active {
+  background:rgba(0,255,65,.12);
+  border-color:var(--green);
+  box-shadow:0 0 10px rgba(0,255,65,.4);
+}
+
+/* ── Body row ── */
+.body-row {
+  flex:1; display:flex; overflow:hidden; position:relative;
+}
+
+/* ── Video wrap ── */
+.video-wrap {
+  position:relative;
+  flex:1; min-width:0;
+  background:#000;
+  overflow:hidden;
+}
+
+video#cam {
+  /* Full coverage, no mirror */
+  position:absolute; inset:0;
+  width:100%; height:100%;
+  object-fit:cover;
+  display:block;
+  filter:brightness(.72) contrast(1.1) saturate(0.2);
+  /* NO transform: scaleX(-1) — camera shown as-is */
+}
+
+canvas#overlay {
+  position:absolute; inset:0;
+  width:100%; height:100%;
+  pointer-events:none;
+  /* Canvas coords match video — no flip needed */
+}
+
+/* HUD corners */
+.hc { position:absolute; width:24px; height:24px; z-index:5; }
+.hc.tl{top:8px;left:8px;border-top:2px solid var(--green);border-left:2px solid var(--green);}
+.hc.tr{top:8px;right:8px;border-top:2px solid var(--green);border-right:2px solid var(--green);}
+.hc.bl{bottom:8px;left:8px;border-bottom:2px solid var(--green);border-left:2px solid var(--green);}
+.hc.br{bottom:8px;right:8px;border-bottom:2px solid var(--green);border-right:2px solid var(--green);}
+
+/* REC */
+.rec {
+  position:absolute; top:12px; left:50%; transform:translateX(-50%);
+  display:flex; align-items:center; gap:6px;
+  font-size:.55rem; opacity:.65; z-index:5; letter-spacing:.1em;
+}
+.dot { width:6px;height:6px;border-radius:50%;background:var(--red);animation:blink .9s step-end infinite; }
+@keyframes blink{0%,100%{opacity:1;}50%{opacity:0;}}
+
+/* Camera flip button (overlay) */
+#flip-btn {
+  position:absolute; bottom:14px; left:14px; z-index:6;
+  width:36px; height:36px;
+  background:rgba(0,0,0,.55);
+  border:1px solid var(--border);
+  color:var(--green); font-size:1.1rem;
+  cursor:pointer; display:flex; align-items:center; justify-content:center;
+  border-radius:4px;
+  transition:all .2s;
+}
+#flip-btn:hover { background:rgba(0,255,65,.15); border-color:var(--green); }
+
+/* ── Side panel ── */
+.panel {
+  width:var(--panel-w);
+  background:var(--panel);
+  border-left:1px solid var(--border);
+  display:flex; flex-direction:column;
+  overflow-y:auto; overflow-x:hidden;
+  z-index:15; flex-shrink:0;
+  transition: width .28s cubic-bezier(.4,0,.2,1),
+              opacity .28s ease,
+              transform .28s cubic-bezier(.4,0,.2,1);
+}
+.panel.collapsed {
+  width:0 !important;
+  opacity:0;
+  pointer-events:none;
+  transform:translateX(20px);
+}
+
+.psec {
+  border-bottom:1px solid var(--border);
+  padding:10px 12px;
+  flex-shrink:0;
+}
+.psec-t {
+  font-family:'Orbitron',sans-serif; font-size:.5rem;
+  letter-spacing:.2em; opacity:.5;
+  margin-bottom:7px; padding-bottom:4px;
+  border-bottom:1px solid rgba(0,255,65,.1);
+  white-space:nowrap;
+}
+
+/* Legend */
+.legend { display:flex; flex-direction:column; gap:5px; }
+.leg-row { display:flex; align-items:center; gap:7px; font-size:.6rem; }
+.leg-dot { width:9px;height:9px;border-radius:1px;flex-shrink:0; }
+.ld-live{background:var(--red);box-shadow:0 0 5px var(--red);}
+.ld-ghost{background:var(--orange);box-shadow:0 0 5px var(--orange);opacity:.85;}
+.ld-lost{background:#444;}
+.leg-desc { opacity:.65; white-space:nowrap; }
+
+/* Sliders */
+.sl-row { display:flex; flex-direction:column; gap:3px; margin-bottom:6px; font-size:.58rem; }
+.sl-row label { display:flex; justify-content:space-between; }
+.sl-row input[type=range] { width:100%; accent-color:var(--green); cursor:pointer; height:3px; }
+
+/* Target list */
+#tgt-list { display:flex; flex-direction:column; gap:4px; min-height:36px; }
+.tcard {
+  padding:5px 7px; font-size:.58rem;
+  border-left:2px solid var(--red);
+  background:rgba(255,0,60,.06);
+  display:flex; flex-direction:column; gap:2px;
+}
+.tcard.ghost{border-left-color:var(--orange);background:rgba(255,136,0,.06);}
+.tcard.lost{border-left-color:#333;opacity:.45;}
+.tcard-id{color:var(--green);letter-spacing:.1em;}
+.tcard-st{opacity:.55;}
+.tcard-cf{color:var(--blue);}
+.no-tgt{font-size:.58rem;opacity:.3;font-style:italic;}
+
+/* Feed */
+#feed{font-size:.52rem;opacity:.38;display:flex;flex-direction:column;gap:1px;overflow:hidden;max-height:80px;}
+.feed-line{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
+/* ════════════════════════════
+   START SCREEN
+════════════════════════════ */
+#start {
+  position:fixed; inset:0; z-index:400;
+  background:rgba(1,6,2,.97);
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:22px;
+}
+.s-logo {
+  font-family:'Orbitron',sans-serif; font-weight:900;
+  font-size:clamp(1.6rem,5vw,3.2rem);
+  letter-spacing:.4em; text-align:center;
+  text-shadow:0 0 18px var(--green),0 0 55px var(--green);
+  animation:glow 2s ease-in-out infinite;
+}
+.s-sub{font-size:.7rem;opacity:.45;letter-spacing:.15em;text-align:center;}
+.s-feats{
+  font-size:.62rem;opacity:.58;text-align:center;line-height:2;
+  border:1px solid var(--border);padding:11px 18px;max-width:320px;
+}
+.s-feats em{color:var(--orange);font-style:normal;}
+.s-btn{
+  font-family:'Orbitron',sans-serif;font-size:.82rem;letter-spacing:.3em;
+  padding:13px 36px;background:transparent;
+  color:var(--green);border:2px solid var(--green);cursor:pointer;
+  box-shadow:0 0 16px rgba(0,255,65,.22),inset 0 0 16px rgba(0,255,65,.04);
+  transition:all .2s; -webkit-tap-highlight-color:transparent;
+}
+.s-btn:hover,.s-btn:active{background:var(--green);color:#000;box-shadow:0 0 45px rgba(0,255,65,.9);}
+.prog-wrap{width:240px;height:3px;background:rgba(0,255,65,.1);display:none;}
+.prog-fill{height:100%;background:var(--green);width:0%;transition:width .3s;box-shadow:0 0 8px var(--green);}
+#load-msg{font-size:.62rem;opacity:.5;letter-spacing:.1em;min-height:1em;}
+</style>
+</head>
+<body>
+
+<div id="app">
+  <header>
+    <div class="logo">◈ WALLHACK</div>
+    <div class="hdr-right">
+      <div class="hstats">
+        <div class="hs"><span class="hs-lbl">CIBLES</span><span class="hs-val" id="h-count">0</span></div>
+        <div class="hs"><span class="hs-lbl">GHOSTS</span><span class="hs-val" id="h-ghosts">0</span></div>
+        <div class="hs"><span class="hs-lbl">FPS</span><span class="hs-val" id="h-fps">--</span></div>
+      </div>
+      <button id="panel-toggle" title="Afficher/masquer le panneau" onclick="togglePanel()">☰</button>
+    </div>
+  </header>
+
+  <div class="body-row">
+    <!-- VIDEO -->
+    <div class="video-wrap" id="video-wrap">
+      <div class="hc tl"></div><div class="hc tr"></div>
+      <div class="hc bl"></div><div class="hc br"></div>
+      <div class="rec"><div class="dot"></div>REC</div>
+      <video id="cam" autoplay muted playsinline></video>
+      <canvas id="overlay"></canvas>
+      <button id="flip-btn" title="Changer caméra" onclick="switchCamera()">⟳</button>
+    </div>
+
+    <!-- PANEL -->
+    <div class="panel" id="panel">
+      <div class="psec">
+        <div class="psec-t">// LÉGENDE</div>
+        <div class="legend">
+          <div class="leg-row"><div class="leg-dot ld-live"></div><span class="leg-desc">DÉTECTÉ (IA live)</span></div>
+          <div class="leg-row"><div class="leg-dot ld-ghost"></div><span class="leg-desc">GHOST (prédit)</span></div>
+          <div class="leg-row"><div class="leg-dot ld-lost"></div><span class="leg-desc">PERDU / expiré</span></div>
+        </div>
+      </div>
+
+      <div class="psec">
+        <div class="psec-t">// PARAMÈTRES</div>
+        <div class="sl-row">
+          <label><span>Durée ghost</span><span id="lbl-ghost" style="color:var(--orange)">4.0s</span></label>
+          <input type="range" id="sl-ghost" min="1" max="10" step="0.5" value="4" oninput="updateParams()">
+        </div>
+        <div class="sl-row">
+          <label><span>Confiance min</span><span id="lbl-conf" style="color:var(--blue)">45%</span></label>
+          <input type="range" id="sl-conf" min="20" max="90" step="5" value="45" oninput="updateParams()">
+        </div>
+        <div class="sl-row">
+          <label><span>Lissage</span><span id="lbl-smooth" style="color:var(--green)">0.6</span></label>
+          <input type="range" id="sl-smooth" min="0.1" max="0.95" step="0.05" value="0.6" oninput="updateParams()">
+        </div>
+      </div>
+
+      <div class="psec" style="flex:1">
+        <div class="psec-t">// CIBLES</div>
+        <div id="tgt-list"><div class="no-tgt">EN ATTENTE...</div></div>
+      </div>
+
+      <div class="psec">
+        <div class="psec-t">// JOURNAL</div>
+        <div id="feed"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- START SCREEN -->
+<div id="start">
+  <div class="s-logo">WALL<br>HACK</div>
+  <div class="s-sub">// DÉTECTION + TRACKING PRÉDICTIF //</div>
+  <div class="s-feats">
+    ✦ Détection IA temps réel (COCO-SSD)<br>
+    <em>✦ Ghost prédictif derrière les obstacles</em><br>
+    ✦ Vélocité + accélération + amortissement<br>
+    <em>✦ Réassociation automatique au retour</em><br>
+    ✦ Panneau latéral escamotable
+  </div>
+  <button class="s-btn" onclick="boot()">▶ ACTIVER</button>
+  <div class="prog-wrap" id="prog-wrap"><div class="prog-fill" id="prog"></div></div>
+  <div id="load-msg"></div>
+</div>
+
+<script>
+// ════════════════════════════════════════
+//  PARAMS
+// ════════════════════════════════════════
+let GHOST_TTL = 4000;
+let MIN_CONF  = 0.45;
+let SMOOTH    = 0.6;
+
+function updateParams() {
+  GHOST_TTL = parseFloat(document.getElementById('sl-ghost').value) * 1000;
+  MIN_CONF  = parseFloat(document.getElementById('sl-conf').value) / 100;
+  SMOOTH    = parseFloat(document.getElementById('sl-smooth').value);
+  document.getElementById('lbl-ghost').textContent  = (GHOST_TTL/1000).toFixed(1)+'s';
+  document.getElementById('lbl-conf').textContent   = (MIN_CONF*100).toFixed(0)+'%';
+  document.getElementById('lbl-smooth').textContent = SMOOTH.toFixed(2);
+}
+
+// ════════════════════════════════════════
+//  PANEL TOGGLE
+// ════════════════════════════════════════
+let panelOpen = true;
+function togglePanel() {
+  panelOpen = !panelOpen;
+  document.getElementById('panel').classList.toggle('collapsed', !panelOpen);
+  document.getElementById('panel-toggle').textContent = panelOpen ? '☰' : '◧';
+  setTimeout(resize, 300); // re-sync canvas after transition
+}
+
+// ════════════════════════════════════════
+//  CAMERA
+// ════════════════════════════════════════
+let facingMode = 'environment'; // rear camera on mobile
+let stream = null;
+const video = document.getElementById('cam');
+
+async function startCamera() {
+  if (stream) { stream.getTracks().forEach(t => t.stop()); }
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode, width:{ ideal:1280 }, height:{ ideal:720 } },
+    audio: false
+  });
+  video.srcObject = stream;
+  await new Promise(r => video.onloadedmetadata = r);
+  await video.play();
+}
+
+async function switchCamera() {
+  facingMode = facingMode === 'environment' ? 'user' : 'environment';
+  try { await startCamera(); }
+  catch(e) {
+    facingMode = facingMode === 'environment' ? 'user' : 'environment'; // revert
+  }
+}
+
+// ════════════════════════════════════════
+//  TRACKER CLASS
+// ════════════════════════════════════════
+let nextId = 1;
+class PersonTracker {
+  constructor(bbox) {
+    this.id        = nextId++;
+    this.state     = 'live';
+    this.bbox      = [...bbox];
+    this.vx = 0; this.vy = 0;
+    this.conf      = 1;
+    this.lastSeen  = performance.now();
+    this.ghostSince = null;
+    this.trail     = [];
+    this.age       = 0;
+  }
+  centre() { return [this.bbox[0]+this.bbox[2]/2, this.bbox[1]+this.bbox[3]/2]; }
+
+  updateLive(bbox, conf, dt) {
+    const prevCx = this.bbox[0]+this.bbox[2]/2;
+    const prevCy = this.bbox[1]+this.bbox[3]/2;
+    const a = SMOOTH;
+    this.bbox[0] = a*this.bbox[0]+(1-a)*bbox[0];
+    this.bbox[1] = a*this.bbox[1]+(1-a)*bbox[1];
+    this.bbox[2] = a*this.bbox[2]+(1-a)*bbox[2];
+    this.bbox[3] = a*this.bbox[3]+(1-a)*bbox[3];
+    const cx = this.bbox[0]+this.bbox[2]/2;
+    const cy = this.bbox[1]+this.bbox[3]/2;
+    if (dt > 0) {
+      this.vx = 0.7*this.vx + 0.3*(cx-prevCx)/dt;
+      this.vy = 0.7*this.vy + 0.3*(cy-prevCy)/dt;
+    }
+    this.conf = conf;
+    this.state = 'live';
+    this.lastSeen = performance.now();
+    this.ghostSince = null;
+    this.age++;
+    const [ncx,ncy] = this.centre();
+    this.addTrail(ncx,ncy);
+  }
+
+  predict(now) {
+    if (this.state==='lost') return;
+    if (!this.ghostSince) this.ghostSince = now;
+    this.state = 'ghost';
+    const dt = now - this.lastSeen; // ms since last real detection
+    const decay = Math.exp(-0.0008 * dt);
+    const [cx0,cy0] = this.centre();
+    const predCx = cx0 + this.vx * dt * decay;
+    const predCy = cy0 + this.vy * dt * decay;
+    this.bbox[0] = predCx - this.bbox[2]/2;
+    this.bbox[1] = predCy - this.bbox[3]/2;
+    this.addTrail(predCx, predCy);
+    if (now - this.ghostSince > GHOST_TTL) this.state = 'lost';
+  }
+
+  addTrail(cx,cy) {
+    this.trail.push({x:cx,y:cy,t:performance.now()});
+    if (this.trail.length>50) this.trail.shift();
+  }
+
+  ghostAlpha() {
+    if (this.state!=='ghost') return 1;
+    return Math.max(0, 1-(performance.now()-this.ghostSince)/GHOST_TTL);
+  }
+}
+
+// ════════════════════════════════════════
+//  MATCHING
+// ════════════════════════════════════════
+function iou(a,b) {
+  const ix1=Math.max(a[0],b[0]),iy1=Math.max(a[1],b[1]);
+  const ix2=Math.min(a[0]+a[2],b[0]+b[2]),iy2=Math.min(a[1]+a[3],b[1]+b[3]);
+  if(ix2<ix1||iy2<iy1) return 0;
+  const inter=(ix2-ix1)*(iy2-iy1);
+  return inter/(a[2]*a[3]+b[2]*b[3]-inter);
+}
+function dist2(a,b) {
+  return Math.hypot(a[0]+a[2]/2-(b[0]+b[2]/2), a[1]+a[3]/2-(b[1]+b[3]/2));
+}
+
+// ════════════════════════════════════════
+//  GLOBALS
+// ════════════════════════════════════════
+let model, canvas, ctx;
+let trackers = [];
+let lastDetectTime = performance.now();
+let frameCount=0, lastFpsT=performance.now();
+
+// ════════════════════════════════════════
+//  BOOT
+// ════════════════════════════════════════
+async function boot() {
+  const btn = document.querySelector('.s-btn');
+  btn.disabled=true; btn.textContent='INITIALISATION...';
+  document.getElementById('prog-wrap').style.display='block';
+  msg('▸ Accès caméra...'); prog(10);
+
+  try { await startCamera(); }
+  catch(e) { msg('✗ Caméra refusée. Autorise l\'accès.'); btn.disabled=false; btn.textContent='▶ RÉESSAYER'; return; }
+
+  msg('▸ Chargement IA (COCO-SSD)...'); prog(40);
+  model = await cocoSsd.load({base:'mobilenet_v2'});
+  prog(95); msg('▸ Système prêt.');
+  prog(100);
+  await new Promise(r=>setTimeout(r,350));
+
+  document.getElementById('start').style.display='none';
+
+  canvas = document.getElementById('overlay');
+  ctx = canvas.getContext('2d');
+  resize();
+  window.addEventListener('resize', resize);
+  // Also listen to orientation change on mobile
+  window.addEventListener('orientationchange', ()=>setTimeout(resize,400));
+
+  loop();
+}
+
+function msg(t){document.getElementById('load-msg').textContent=t;}
+function prog(p){document.getElementById('prog').style.width=p+'%';}
+
+function resize() {
+  const wrap = document.getElementById('video-wrap');
+  const r = wrap.getBoundingClientRect();
+  canvas.width  = Math.round(r.width);
+  canvas.height = Math.round(r.height);
+}
+
+// ════════════════════════════════════════
+//  MAIN LOOP
+// ════════════════════════════════════════
+async function loop() {
+  if (!model) return;
+  const now = performance.now();
+  const dt  = now - lastDetectTime;
+  lastDetectTime = now;
+
+  frameCount++;
+  if (now - lastFpsT > 600) {
+    document.getElementById('h-fps').textContent = Math.round(frameCount/((now-lastFpsT)/1000));
+    frameCount=0; lastFpsT=now;
+  }
+
+  let detections = [];
+  try { detections = (await model.detect(video)).filter(d=>d.class==='person' && d.score>=MIN_CONF); }
+  catch(e){}
+
+  // Scale to canvas coords
+  const sx = canvas.width  / (video.videoWidth  || 1);
+  const sy = canvas.height / (video.videoHeight || 1);
+  const scaled = detections.map(d=>({
+    bbox:[d.bbox[0]*sx, d.bbox[1]*sy, d.bbox[2]*sx, d.bbox[3]*sy],
+    score:d.score
+  }));
+
+  // ── Match detections → trackers ──
+  const matched   = new Set();
+  const usedDets  = new Set();
+
+  for (const tr of trackers.filter(t=>t.state!=='lost')) {
+    let best=-1, bestI=-1;
+    for (let i=0;i<scaled.length;i++) {
+      if (usedDets.has(i)) continue;
+      const score = iou(tr.bbox,scaled[i].bbox)*2 - dist2(tr.bbox,scaled[i].bbox)*0.001;
+      if (score>best){best=score;bestI=i;}
+    }
+    if (bestI>=0 && (iou(tr.bbox,scaled[bestI].bbox)>0.08 || dist2(tr.bbox,scaled[bestI].bbox)<180)) {
+      tr.updateLive(scaled[bestI].bbox, scaled[bestI].score, dt);
+      matched.add(tr.id); usedDets.add(bestI);
+    }
+  }
+
+  // Unmatched trackers → ghost
+  for (const tr of trackers)
+    if (!matched.has(tr.id) && tr.state!=='lost') tr.predict(now);
+
+  // New detections → new trackers
+  for (let i=0;i<scaled.length;i++) {
+    if (!usedDets.has(i)) {
+      const t = new PersonTracker(scaled[i].bbox);
+      t.conf=scaled[i].score;
+      trackers.push(t);
+      feed(`NEW TGT-${t.id} détectée`);
+    }
+  }
+
+  // Purge fully expired trackers
+  trackers = trackers.filter(t=>!(t.state==='lost' && performance.now()-t.ghostSince>GHOST_TTL+2000));
+
+  // ── Render ──
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  for (const t of trackers) drawTracker(t);
+  const live = trackers.filter(t=>t.state==='live');
+  drawCrosshair(live);
+
+  document.getElementById('h-count').textContent  = live.length;
+  document.getElementById('h-ghosts').textContent = trackers.filter(t=>t.state==='ghost').length;
+  updateUI();
+
+  requestAnimationFrame(loop);
+}
+
+// ════════════════════════════════════════
+//  DRAW
+// ════════════════════════════════════════
+function drawTracker(t) {
+  const [x,y,w,h] = t.bbox;
+  const alpha = t.ghostAlpha();
+  if (alpha<=0.01) return;
+
+  const col   = t.state==='live' ? '#ff003c' : t.state==='ghost' ? '#ff8800' : '#555';
+  const now   = performance.now();
+
+  ctx.save();
+
+  // ── Trail ──
+  if (t.trail.length>1) {
+    for (let i=1;i<t.trail.length;i++) {
+      const pt  = t.trail[i];
+      const age = (now-pt.t)/1600;
+      if (age>1) continue;
+      const a = (1-age)*0.4*alpha;
+      ctx.globalAlpha=a;
+      ctx.strokeStyle=col;
+      ctx.lineWidth=2;
+      ctx.beginPath();
+      ctx.moveTo(t.trail[i-1].x,t.trail[i-1].y);
+      ctx.lineTo(pt.x,pt.y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha=1;
+  }
+
+  ctx.globalAlpha = t.state==='ghost' ? alpha*0.9 : 1;
+
+  if (t.state==='ghost') {
+    // Dashed pulsing border
+    const pulse=(Math.sin(now/220)+1)/2;
+    ctx.setLineDash([9,5]);
+    ctx.strokeStyle=col; ctx.lineWidth=2;
+    ctx.shadowColor=col; ctx.shadowBlur=10+pulse*14;
+    ctx.strokeRect(x,y,w,h);
+    ctx.setLineDash([]); ctx.shadowBlur=0;
+
+    // Animated fill scan
+    const scanT=(now%1800)/1800;
+    if (scanT>0&&scanT<1) {
+      const grd=ctx.createLinearGradient(x,y,x,y+h);
+      grd.addColorStop(0,'rgba(255,136,0,0.02)');
+      grd.addColorStop(Math.max(0,scanT-.06),'rgba(255,136,0,0.02)');
+      grd.addColorStop(scanT,'rgba(255,136,0,0.22)');
+      grd.addColorStop(Math.min(1,scanT+.06),'rgba(255,136,0,0.02)');
+      grd.addColorStop(1,'rgba(255,136,0,0.02)');
+      ctx.fillStyle=grd; ctx.fillRect(x,y,w,h);
+    }
+
+    // Label
+    ctx.font='bold 11px "Share Tech Mono"';
+    ctx.fillStyle=col; ctx.shadowColor=col; ctx.shadowBlur=8;
+    ctx.fillText(`GHOST-${t.id} [${(alpha*100).toFixed(0)}%]`,x+3,y-6);
+    ctx.shadowBlur=0;
+
+    // Direction arrow
+    const [cx,cy]=t.centre();
+    const spd=Math.hypot(t.vx,t.vy)*80;
+    if (spd>3) {
+      const len=Math.min(spd*50,w*.6);
+      const ang=Math.atan2(t.vy,t.vx);
+      drawArrow(cx,cy,cx+Math.cos(ang)*len,cy+Math.sin(ang)*len,col,alpha*.75);
+    }
+
+  } else if (t.state==='live') {
+    // Glow layers
+    for (let g=3;g>=1;g--) {
+      ctx.strokeStyle=col; ctx.lineWidth=g*4;
+      ctx.globalAlpha=0.05*g;
+      ctx.strokeRect(x-g,y-g,w+g*2,h+g*2);
+    }
+    ctx.globalAlpha=1;
+
+    // Main box
+    ctx.strokeStyle=col; ctx.lineWidth=2;
+    ctx.shadowColor=col; ctx.shadowBlur=16;
+    ctx.strokeRect(x,y,w,h); ctx.shadowBlur=0;
+
+    // Fill tint
+    ctx.fillStyle='rgba(255,0,60,0.05)'; ctx.fillRect(x,y,w,h);
+
+    // Corner brackets
+    const cs=14;
+    ctx.shadowColor=col; ctx.shadowBlur=10;
+    [[x,y],[x+w,y],[x,y+h],[x+w,y+h]].forEach(([bx,by],i)=>{
+      const dx=i%2===0?1:-1, dy=i<2?1:-1;
+      ctx.beginPath();
+      ctx.moveTo(bx+dx*cs,by); ctx.lineTo(bx,by); ctx.lineTo(bx,by+dy*cs);
+      ctx.stroke();
+    });
+    ctx.shadowBlur=0;
+
+    // Head dot
+    const hr=w*.11;
+    ctx.beginPath(); ctx.arc(x+w/2,y+hr*.8,hr,0,Math.PI*2); ctx.stroke();
+
+    // Label
+    ctx.font='bold 11px "Share Tech Mono"';
+    ctx.fillStyle=col; ctx.shadowColor=col; ctx.shadowBlur=8;
+    ctx.fillText(`TGT-${t.id}  ${(t.conf*100).toFixed(0)}%`,x+3,y-6);
+    ctx.shadowBlur=0;
+  }
+
+  ctx.restore();
+}
+
+function drawArrow(x1,y1,x2,y2,col,a) {
+  const ang=Math.atan2(y2-y1,x2-x1), as=9;
+  ctx.save();
+  ctx.globalAlpha=a;
+  ctx.strokeStyle=col; ctx.fillStyle=col; ctx.lineWidth=1.5;
+  ctx.shadowColor=col; ctx.shadowBlur=6;
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x2,y2);
+  ctx.lineTo(x2-as*Math.cos(ang-.4),y2-as*Math.sin(ang-.4));
+  ctx.lineTo(x2-as*Math.cos(ang+.4),y2-as*Math.sin(ang+.4));
+  ctx.closePath(); ctx.fill(); ctx.shadowBlur=0;
+  ctx.restore();
+}
+
+function drawCrosshair(live) {
+  if (!live.length) return;
+  const biggest=live.reduce((a,b)=>a.bbox[2]*a.bbox[3]>b.bbox[2]*b.bbox[3]?a:b);
+  const [cx,cy]=biggest.centre();
+  const s=24,g=8;
+  ctx.strokeStyle='rgba(255,0,60,0.65)'; ctx.lineWidth=1.5;
+  ctx.shadowColor='#ff003c'; ctx.shadowBlur=9;
+  ctx.beginPath();
+  ctx.moveTo(cx-s,cy);ctx.lineTo(cx-g,cy);
+  ctx.moveTo(cx+g,cy);ctx.lineTo(cx+s,cy);
+  ctx.moveTo(cx,cy-s);ctx.lineTo(cx,cy-g);
+  ctx.moveTo(cx,cy+g);ctx.lineTo(cx,cy+s);
+  ctx.stroke(); ctx.shadowBlur=0;
+}
+
+// ════════════════════════════════════════
+//  UI
+// ════════════════════════════════════════
+function updateUI() {
+  const el=document.getElementById('tgt-list');
+  const active=trackers.filter(t=>t.state!=='lost');
+  if (!active.length){el.innerHTML='<div class="no-tgt">AUCUNE CIBLE</div>';return;}
+  el.innerHTML=active.map(t=>{
+    const cls=t.state==='ghost'?'ghost':t.state==='lost'?'lost':'';
+    const st=t.state==='live'?'● LIVE':t.state==='ghost'?`◌ GHOST [${(t.ghostAlpha()*100).toFixed(0)}%]`:'✗ LOST';
+    return `<div class="tcard ${cls}">
+      <div class="tcard-id">TGT-${t.id}</div>
+      <div class="tcard-st">${st}</div>
+      <div class="tcard-cf">CONF ${(t.conf*100).toFixed(0)}% | ${t.age}f</div>
+    </div>`;
+  }).join('');
+}
+
+let feedLines=[];
+function feed(m) {
+  const ts=new Date().toLocaleTimeString('fr',{hour12:false});
+  feedLines.unshift(`[${ts}] ${m}`);
+  if (feedLines.length>10) feedLines.pop();
+  document.getElementById('feed').innerHTML=feedLines.map(l=>`<div class="feed-line">${l}</div>`).join('');
+}
+</script>
+</body>
+</html>
